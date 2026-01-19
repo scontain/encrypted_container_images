@@ -11,8 +11,6 @@ This document explains the architecture and mechanisms for pulling encrypted con
 3. [Pulling Encrypted Images Without Kata Runtime](#3-pulling-encrypted-images-without-kata-runtime)
 4. [References](#4-references)
 
----
-
 ## 1. Standard Kubernetes Image Pull Process
 
 ### 1.1 Overview
@@ -21,20 +19,25 @@ When a Pod is scheduled to a node, Kubernetes must ensure the container images a
 
 ### 1.2 Components Involved
 
-| Component | Role |
-|-----------|------|
-| **kubelet** | Node agent that manages Pod lifecycle [1] |
-| **CRI (Container Runtime Interface)** | gRPC API between kubelet and container runtime [1] |
-| **containerd** | Industry-standard container runtime [2] |
-| **Snapshotter** | Manages filesystem snapshots for container layers [3] |
-| **Content Store** | Content-addressable storage for image blobs [3] |
-| **Registry** | Remote storage for container images (e.g., Docker Hub, GCR) [4] |
+| Component                             | Role                                                            |
+|---------------------------------------|-----------------------------------------------------------------|
+| **kubelet**                           | Node agent that manages Pod lifecycle [1]                       |
+| **CRI (Container Runtime Interface)** | gRPC API between kubelet and container runtime [1]              |
+| **containerd**                        | Industry-standard container runtime [2]                         |
+| **Snapshotter**                       | Manages filesystem snapshots for container layers [3]           |
+| **Content Store**                     | Content-addressable storage for image blobs [3]                 |
+| **Registry**                          | Remote storage for container images (e.g., Docker Hub, GCR) [4] |
 
 ### 1.3 Pull Sequence
 
 The Kubernetes Container Runtime Interface (CRI) defines the main gRPC protocol for communication between the kubelet and container runtime [1]. The `PullImage` RPC method handles image pulls through this interface [1].
 
 ```mermaid
+---
+config:
+  look: neo
+  theme: redux-dark-color
+---
 sequenceDiagram
     participant K as kubelet
     participant C as containerd
@@ -42,16 +45,16 @@ sequenceDiagram
     participant R as registry
 
     K->>C: PullImage (CRI gRPC) [1]
-    C->>R: GET /v2/&lt;name&gt;/manifests/&lt;ref&gt; [4]
+    C->>R: GET `/v2/<name>/manifests/<ref>` [4]
     R-->>C: Image manifest (layers, config)
-    
+
     loop For each layer
-        C->>R: GET /v2/&lt;name&gt;/blobs/&lt;digest&gt; [4]
+        C->>R: GET `/v2/<name>/blobs/<digest>` [4]
         R-->>C: Layer blob (tar+gzip)
         C->>S: Prepare snapshot [3]
         C->>S: Unpack layer [3]
     end
-    
+
     C-->>K: Image ready
 ```
 
@@ -112,12 +115,6 @@ graph TB
     LN --> L2
     L2 --> L1
     L1 --> B
-    
-    style W fill:#90EE90
-    style LN fill:#E8E8E8
-    style L2 fill:#E8E8E8
-    style L1 fill:#E8E8E8
-    style B fill:#E8E8E8
 ```
 
 The snapshotter creates a chain of read-only snapshots for each layer, with a writable layer on top for container modifications [3]. containerd ships with several built-in snapshotters, with overlayfs as the default [3].
@@ -147,8 +144,6 @@ containerd uses content-addressable storage where blobs are identified by their 
 | **Decryption** | Not applicable (plaintext images) |
 | **Trust model** | Trust the host, cluster admins, registry |
 | **Verification** | Digest verification only [3] |
-
----
 
 ## 2. CoCo Encrypted Image Pull Flow
 
@@ -217,10 +212,6 @@ flowchart TB
     
     KEK -->|"Wraps"| LEK
     LEK -->|"Encrypts"| LC
-    
-    style KEK fill:#FFB6C1
-    style LEK fill:#87CEEB
-    style LC fill:#98FB98
 ```
 
 - **KEK (Key Encryption Key)**: Master key stored in the Key Broker Service (KBS), released only after successful TEE attestation [12]
@@ -232,55 +223,54 @@ CoCo uses Kata Containers to run pods inside lightweight VMs (micro-VMs) backed 
 
 ```mermaid
 flowchart TB
-    subgraph Host["Worker Node (Host)"]
+    subgraph Host["Worker Node - Host"]
         K[kubelet]
         C[containerd]
         KS[kata-shim]
         NS[nydus-snapshotter]
-        HV[Hypervisor<br/>QEMU/CLH]
+        HV[Hypervisor<br/>QEMU or CLH]
     end
-    
-    subgraph TEE["Confidential VM (TEE: TDX/SEV-SNP)"]
+
+    subgraph TEE["Confidential VM - TEE"]
         KA[kata-agent]
-        IR["image-rs [14]"]
-        CDH["CDH [15]"]
-        AA["Attestation Agent [16]"]
+        IR["image-rs"]
+        CDH["CDH"]
+        AA["Attestation Agent"]
     end
-    
+
     subgraph External["External Services"]
-        KBS["KBS + Attestation Service [12]"]
+        KBS["KBS + Attestation Service"]
         REG[Container Registry]
     end
-    
+
     K --> C
     C --> KS
     C --> NS
     KS --> HV
     HV --> KA
-    NS -.->|"Redirect pull [17]"| KA
-    
+    NS -.->|"Redirect pull"| KA
+
     KA --> IR
     IR --> CDH
     CDH --> AA
-    
+
     IR -->|"Pull layers"| REG
-    AA -->|"Attestation + Key Request [18]"| KBS
-    
-    style TEE fill:#E6F3FF,stroke:#0066CC
-    style Host fill:#FFF0F0,stroke:#CC0000
+    AA -->|"Attestation + Key Request"| KBS
+
+   
 ```
 
 ### 2.5 Guest Components
 
 CoCo introduces several components that run **inside the TEE** [6]:
 
-| Component | Role |
-|-----------|------|
-| **kata-agent** | Manages container lifecycle inside the VM [6] |
-| **image-rs** | Rust crate for pulling, decrypting, and unpacking images [14] |
-| **CDH (Confidential Data Hub)** | Coordinates secret retrieval and key management [15] |
-| **AA (Attestation Agent)** | Handles TEE attestation and KBS communication [16] |
-| **ocicrypt-rs** | Rust implementation of OCI encryption/decryption [7] |
+| Component                       | Role                                                          |
+|---------------------------------|---------------------------------------------------------------|
+| **kata-agent**                  | Manages container lifecycle inside the VM [6]                 |
+| **image-rs**                    | Rust crate for pulling, decrypting, and unpacking images [14] |
+| **CDH (Confidential Data Hub)** | Coordinates secret retrieval and key management [15]          |
+| **AA (Attestation Agent)**      | Handles TEE attestation and KBS communication [16]            |
+| **ocicrypt-rs**                 | Rust implementation of OCI encryption/decryption [7]          |
 
 **Important**: `image-rs` is a **Rust crate (library)**, not a standalone binary. The design document states it is "a rustified and tailored version of containers/image, to provide a small, simple, secure, lightweight and high performance OCI container image management library" [14]. It is imported and used by `kata-agent` to perform image operations.
 
@@ -302,30 +292,30 @@ sequenceDiagram
 
     K->>C: CreatePod
     C->>NS: Pull image
-    NS->>KA: Redirect to guest [17]
-    
-    KA->>IR: Pull encrypted image [14]
+    NS->>KA: Redirect to guest
+
+    KA->>IR: Pull encrypted image
     IR->>R: Download manifest + encrypted layers
     R-->>IR: Encrypted layers
-    
-    IR->>CDH: Request decryption key [15]
-    CDH->>AA: Get key (key ID from annotation)
-    
-    AA->>KBS: POST /kbs/v0/auth [18]
-    KBS-->>AA: Challenge (nonce) [18]
-    AA->>KBS: POST /kbs/v0/attest with TEE evidence [18]
-    
-    Note over KBS: Verify attestation<br/>via Attestation Service [12]
-    
-    KBS-->>AA: Attestation token (JWT) [18]
-    AA->>KBS: GET /kbs/v0/resource/&lt;path&gt; [18]
+
+    IR->>CDH: Request decryption key
+    CDH->>AA: Get key from annotation
+
+    AA->>KBS: POST /kbs/v0/auth
+    KBS-->>AA: Challenge with nonce
+    AA->>KBS: POST /kbs/v0/attest with TEE evidence
+
+    Note over KBS: Verify attestation<br/>via Attestation Service
+
+    KBS-->>AA: Attestation token JWT
+    AA->>KBS: GET /kbs/v0/resource/path
     KBS-->>AA: Wrapped KEK
-    
+
     AA-->>CDH: KEK
     CDH-->>IR: Unwrapped LEK
-    
-    Note over IR: Decrypt layers [9]
-    
+
+    Note over IR: Decrypt layers
+
     IR-->>KA: Image ready
     KA-->>NS: Ready
     NS-->>C: Ready
@@ -342,19 +332,19 @@ sequenceDiagram
     participant KBS as Key Broker Service
     participant AS as Attestation Service
 
-    AA->>KBS: 1. POST /kbs/v0/auth [18]<br/>{"tee": "tdx", "extra_params": {}}
-    KBS-->>AA: 2. Challenge [18]<br/>{"nonce": "&lt;random&gt;"}
-    
+    AA->>KBS: 1. POST /kbs/v0/auth
+    KBS-->>AA: 2. Challenge with nonce
+
     Note over AA: Generate TEE quote<br/>including nonce
-    
-    AA->>KBS: 3. POST /kbs/v0/attest [18]<br/>{"tee_pubkey": "&lt;ephemeral&gt;",<br/>"tee_evidence": "&lt;quote&gt;"}
-    
-    KBS->>AS: Verify evidence [12]
+
+    AA->>KBS: 3. POST /kbs/v0/attest with TEE evidence
+
+    KBS->>AS: Verify evidence
     AS-->>KBS: Verification result
-    
-    KBS-->>AA: 4. Attestation token (JWT) [18]
-    
-    AA->>KBS: 5. GET /kbs/v0/resource/&lt;path&gt; [18]<br/>Authorization: Bearer &lt;token&gt;
+
+    KBS-->>AA: 4. Attestation token JWT
+
+    AA->>KBS: 5. GET /kbs/v0/resource/path with Bearer token
     KBS-->>AA: 6. Wrapped KEK
 ```
 
@@ -365,19 +355,21 @@ The protocol ensures:
 
 ### 2.8 Key Differences: Standard vs CoCo
 
-| Aspect | Standard Kubernetes | Confidential Containers |
-|--------|---------------------|-------------------------|
-| **Pull location** | Host [1] | Inside TEE (guest) [6] |
-| **Image storage** | Host filesystem [3] | Guest memory/filesystem [6] |
-| **Layer format** | Plaintext | Encrypted [7] |
-| **Key retrieval** | N/A | Attestation-gated [18] |
-| **Trust boundary** | Host, cluster admins | Hardware TEE only [6] |
-| **Runtime** | runc/crun | kata-runtime (micro-VM) [6] |
-| **Image visibility** | Visible to host | Opaque to host [6] |
+| Aspect               | Standard Kubernetes  | Confidential Containers     |
+|----------------------|----------------------|-----------------------------|
+| **Pull location**    | Host [1]             | Inside TEE (guest) [6]      |
+| **Image storage**    | Host filesystem [3]  | Guest memory/filesystem [6] |
+| **Layer format**     | Plaintext            | Encrypted [7]               |
+| **Key retrieval**    | N/A                  | Attestation-gated [18]      |
+| **Trust boundary**   | Host, cluster admins | Hardware TEE only [6]       |
+| **Runtime**          | runc/crun            | kata-runtime (micro-VM) [6] |
+| **Image visibility** | Visible to host      | Opaque to host [6]          |
 
 ---
 
 ## 3. Pulling Encrypted Images Without Kata Runtime
+
+> **Demo Note**: The companion [DEMO.md](./DEMO.md) implements this architecture using `offline_fs_kbc` mode, which stores decryption keys locally and **bypasses remote attestation**. This simplifies deployment but provides **no security guarantees**. 
 
 ### 3.1 Motivation
 
@@ -391,7 +383,48 @@ This architecture is simpler but trades per-pod TEE isolation for operational si
 
 ### 3.2 Solution Architecture
 
-The key insight is that the **Attestation Agent (AA)** already implements the **ocicrypt keyprovider protocol** as a gRPC service [19]. containerd's decryption mechanism can call AA directly.
+The key insight is that the **Confidential Data Hub (CDH)** implements the **ocicrypt keyprovider protocol** as a gRPC service [15]. CDH coordinates with the **Attestation Agent (AA)** for attestation when retrieving keys. containerd's decryption mechanism calls CDH directly.
+
+#### Production Architecture (with Remote Attestation)
+
+```mermaid
+flowchart TB
+    subgraph CVM["Confidential VM - TDX or SEV-SNP"]
+        subgraph K8s["Kubernetes"]
+            KL[kubelet]
+        end
+
+        subgraph Runtime["Container Runtime"]
+            CD[containerd]
+            CTD["ctd-decoder<br/>stream processor"]
+        end
+
+        subgraph GuestComponents["Guest Components"]
+            CDH["CDH<br/>keyprovider gRPC<br/>port 50000"]
+            AA["AA<br/>attestation ttrpc<br/>unix socket"]
+            TEE[TEE Evidence<br/>Generation]
+        end
+    end
+
+    subgraph External["External Services"]
+        KBS["KBS + Attestation Service"]
+        REG[Container Registry]
+    end
+
+    KL -->|"CRI"| CD
+    CD -->|"Encrypted layer"| CTD
+    CTD -->|"gRPC UnWrapKey"| CDH
+    CDH -->|"ttrpc Attestation request"| AA
+    AA --> TEE
+
+    CD -->|"Pull"| REG
+    AA -->|"HTTPS Attestation"| KBS
+    CDH -->|"via AA"| KBS
+```
+
+#### Demo Architecture (offline_fs_kbc - Mocked Attestation)
+
+> **Warning**: The demo uses `offline_fs_kbc` mode which stores keys locally without remote attestation. This bypasses the security guarantees of confidential computing and is **NOT suitable for production**.
 
 ```mermaid
 flowchart TB
@@ -399,34 +432,42 @@ flowchart TB
         subgraph K8s["Kubernetes"]
             KL[kubelet]
         end
-        
+
         subgraph Runtime["Container Runtime"]
             CD[containerd]
-            CTD["ctd-decoder [10]<br/>stream processor"]
+            CTD["ctd-decoder<br/>stream processor"]
         end
-        
-        subgraph AA_Box["Attestation Agent"]
-            AA["AA [16]<br/>keyprovider gRPC"]
-            TEE[TEE Evidence<br/>Generation]
+
+        subgraph GuestComponents["Guest Components"]
+            CDH["CDH - keyprovider gRPC<br/>port 50000<br/>offline_fs_kbc mode"]
+            AA["AA - ttrpc unix socket<br/>not used in offline mode"]
+            KEYS["Local Keys File<br/>/etc/aa-offline_fs_kbc-resources.json"]
         end
     end
-    
+
     subgraph External["External Services"]
-        KBS["KBS + Attestation Service [12]"]
         REG[Container Registry]
+        KBS["KBS + Attestation Service<br/>NOT CONTACTED"]
     end
-    
-    KL -->|"CRI [1]"| CD
+
+    KL -->|"CRI"| CD
     CD -->|"Encrypted layer"| CTD
-    CTD -->|"gRPC :50000 [20]<br/>UnWrapKey [19]"| AA
-    AA --> TEE
-    
+    CTD -->|"gRPC UnWrapKey"| CDH
+    CDH -->|"Read key"| KEYS
+
     CD -->|"Pull"| REG
-    AA -->|"HTTPS<br/>Attestation + Keys [18]"| KBS
-    
-    style CVM fill:#E6FFE6,stroke:#009900,stroke-width:2px
-    style External fill:#FFF0E6
+
+    CDH -.->|"SKIPPED"| AA
+    AA -.->|"SKIPPED"| KBS
+
 ```
+
+**Key Differences in Demo Mode:**
+- CDH configured with `offline_fs_kbc` instead of `cc_kbc`
+- Keys stored locally in `/etc/aa-offline_fs_kbc-resources.json` (base64 encoded)
+- No remote attestation performed
+- KBS is deployed but **not contacted** at runtime
+- Attestation Agent runs but is **not used** for key retrieval
 
 ### 3.3 How It Works
 
@@ -434,52 +475,94 @@ flowchart TB
 
 The `ocicrypt` library supports a **keyprovider protocol** that allows external services to handle key operations [11]. The configuration is read from the `OCICRYPT_KEYPROVIDER_CONFIG` environment variable [21]. When containerd encounters an encrypted layer:
 
+##### Production Flow (cc_kbc with Remote Attestation)
+
 ```mermaid
 sequenceDiagram
     participant CD as containerd
-    participant CTD as ctd-decoder [10]
-    participant AA as Attestation Agent [16]
-    participant KBS as KBS [12]
+    participant CTD as ctd-decoder
+    participant CDH as CDH
+    participant AA as Attestation Agent
+    participant KBS as KBS
 
-    CD->>CTD: Decrypt layer<br/>(stream processor)
-    
-    Note over CTD: Read OCICRYPT_KEYPROVIDER_CONFIG [21]<br/>Find "attestation-agent" provider
-    
-    CTD->>AA: gRPC UnWrapKey [19]<br/>{annotation packet}
-    
-    Note over AA: Parse wrapped LEK<br/>Extract key ID
-    
-    AA->>KBS: Attestation (if needed) [18]
+    CD->>CTD: Decrypt layer via stream processor
+
+    Note over CTD: Read OCICRYPT_KEYPROVIDER_CONFIG<br/>Find attestation-agent provider
+
+    CTD->>CDH: gRPC UnWrapKey with annotation
+
+    Note over CDH: Parse wrapped LEK<br/>Extract key ID
+
+    CDH->>AA: ttrpc request for attestation token
+    AA->>KBS: Attestation if needed
     KBS-->>AA: Token
-    AA->>KBS: GET resource (KEK) [18]
-    KBS-->>AA: Wrapped KEK
-    
-    Note over AA: Unwrap LEK using KEK
-    
-    AA-->>CTD: Plaintext LEK
-    
-    Note over CTD: Decrypt layer<br/>using AES-256-CTR [9]
-    
+    AA-->>CDH: Token
+
+    CDH->>KBS: GET resource KEK with token
+    KBS-->>CDH: Wrapped KEK
+
+    Note over CDH: Unwrap LEK using KEK
+
+    CDH-->>CTD: Plaintext LEK
+
+    Note over CTD: Decrypt layer using AES-256-CTR
+
     CTD-->>CD: Decrypted layer
 ```
 
-#### Attestation Agent as Keyprovider
+##### Demo Flow (offline_fs_kbc - No Attestation)
 
-The Attestation Agent exposes a gRPC service implementing the keyprovider protocol [19]. The service listens on port 50000 by default for the keyprovider interface [20]:
+```mermaid
+sequenceDiagram
+    participant CD as containerd
+    participant CTD as ctd-decoder
+    participant CDH as CDH
+    participant KEYS as Local Keys File
+
+    CD->>CTD: Decrypt layer via stream processor
+
+    Note over CTD: Read OCICRYPT_KEYPROVIDER_CONFIG<br/>Find attestation-agent provider
+
+    CTD->>CDH: gRPC UnWrapKey with annotation
+
+    Note over CDH: Parse annotation<br/>Extract key ID
+
+    Note over CDH: offline_fs_kbc mode<br/>Read from local file instead of KBS
+
+    CDH->>KEYS: Read aa-offline_fs_kbc-resources.json
+    KEYS-->>CDH: Base64-encoded KEK
+
+    Note over CDH: Unwrap LEK using KEK
+
+    CDH-->>CTD: Plaintext LEK
+
+    Note over CTD: Decrypt layer using AES-256-CTR
+
+    CTD-->>CD: Decrypted layer
+
+    Note over CD,KEYS: No attestation performed - No KBS contacted
+```
+
+#### CDH as Keyprovider
+
+The Confidential Data Hub (CDH) exposes a gRPC service implementing the keyprovider protocol [15]. The service listens on port 50000 by default for the keyprovider interface:
 
 ```protobuf
 service KeyProviderService {
-    rpc UnWrapKey(keyProviderKeyWrapProtocolInput) 
+    rpc UnWrapKey(keyProviderKeyWrapProtocolInput)
         returns (keyProviderKeyWrapProtocolOutput);
 }
 ```
 
-When AA receives an `UnWrapKey` request [19], it:
+When CDH receives an `UnWrapKey` request [15], it:
 1. Parses the annotation packet containing the wrapped LEK
-2. Initiates attestation with KBS if not already attested [18]
-3. Requests the KEK from KBS using the key ID in the annotation [18]
-4. Unwraps the LEK using the KEK
-5. Returns the plaintext LEK to the caller
+2. Calls the Attestation Agent (AA) via ttrpc to get an attestation token
+3. AA generates TEE evidence and exchanges it with KBS for a token [18]
+4. CDH requests the KEK from KBS using the key ID and attestation token [18]
+5. CDH unwraps the LEK using the KEK
+6. Returns the plaintext LEK to the caller
+
+**Note**: CDH coordinates the entire key retrieval flow, delegating only the attestation step to AA. This separation allows CDH to support multiple Key Broker Clients (KBCs) like `cc_kbc`, `offline_fs_kbc`, etc., each with different attestation and key retrieval strategies [15].
 
 #### containerd Configuration
 
@@ -487,61 +570,114 @@ containerd supports encrypted image decryption through stream processors [10]. T
 
 ### 3.4 Components Required
 
-| Component | Source | Role |
-|-----------|--------|------|
-| **containerd** | Standard distribution | Container runtime with CRI support [2] |
-| **ctd-decoder** | `containerd/imgcrypt` [10] | Stream processor for encrypted layers |
-| **Attestation Agent** | `confidential-containers/guest-components` [16] | Keyprovider + attestation |
-| **KBS + Attestation Service** | `confidential-containers/trustee` [12] | External key broker and verifier |
+| Component                     | Source                                          | Role                                        |
+|-------------------------------|-------------------------------------------------|---------------------------------------------|
+| **containerd**                | Standard distribution                           | Container runtime with CRI support [2]      |
+| **ctd-decoder**               | `containerd/imgcrypt` [10]                      | Stream processor for encrypted layers       |
+| **Confidential Data Hub**     | `confidential-containers/guest-components` [15] | Keyprovider service (gRPC port 50000)       |
+| **Attestation Agent**         | `confidential-containers/guest-components` [16] | TEE attestation service (ttrpc unix socket) |
+| **KBS + Attestation Service** | `confidential-containers/trustee` [12]          | External key broker and verifier            |
 
-The AA can be built with different attesters depending on the TEE platform: `tdx-attester`, `snp-attester`, `az-snp-vtpm-attester`, `az-tdx-vtpm-attester`, `sgx-attester`, `cca-attester`, and `se-attester` [20].
+Both CDH and AA can be built with different attesters depending on the TEE platform: `tdx-attester`, `snp-attester`, `az-snp-vtpm-attester`, `az-tdx-vtpm-attester`, `sgx-attester`, `cca-attester`, and `se-attester` [20].
+
+**Build Configuration:**
+- CDH: Built with `grpc` and `kbs` features to expose keyprovider service
+- AA: Built with `ttrpc` feature to communicate with CDH via unix socket
 
 ### 3.5 Image Pull Flow
+
+#### Production Flow (cc_kbc with Remote Attestation)
 
 ```mermaid
 sequenceDiagram
     participant K as kubelet
     participant C as containerd
-    participant CTD as ctd-decoder [10]
-    participant AA as AA [16]
-    participant KBS as KBS [12]
+    participant CTD as ctd-decoder
+    participant CDH as CDH
+    participant AA as AA
+    participant KBS as KBS
     participant R as Registry
 
-    K->>C: PullImage [1]
-    C->>R: Download manifest + encrypted layers [4]
+    K->>C: PullImage
+    C->>R: Download manifest and encrypted layers
     R-->>C: Encrypted layers
-    
-    C->>CTD: Decrypt layer (stream processor) [10]
-    CTD->>AA: UnWrapKey (gRPC) [19]
-    
-    AA->>KBS: Attestation flow [18]
-    KBS-->>AA: KEK
-    
-    Note over AA: Unwrap LEK
-    
-    AA-->>CTD: LEK
-    
-    Note over CTD: Decrypt layer [9]
-    
+
+    C->>CTD: Decrypt layer via stream processor
+    CTD->>CDH: UnWrapKey gRPC port 50000
+
+    CDH->>AA: Get attestation token via ttrpc
+    AA->>KBS: Attestation flow
+    KBS-->>AA: Attestation token
+    AA-->>CDH: Token
+
+    CDH->>KBS: GET resource with token
+    KBS-->>CDH: KEK
+
+    Note over CDH: Unwrap LEK using KEK
+
+    CDH-->>CTD: LEK
+
+    Note over CTD: Decrypt layer
+
     CTD-->>C: Decrypted layer
-    
-    Note over C: Unpack + snapshot [3]
-    
+
+    Note over C: Unpack and snapshot
+
     C-->>K: Image ready
+```
+
+#### Demo Flow (offline_fs_kbc - No Attestation)
+
+> **Note**: This is the flow used in [DEMO.md](./DEMO.md). Attestation is bypassed and keys are read from a local file.
+
+```mermaid
+sequenceDiagram
+    participant K as kubelet
+    participant C as containerd
+    participant CTD as ctd-decoder
+    participant CDH as CDH
+    participant KEYS as Local Keys
+    participant R as Registry
+
+    K->>C: PullImage
+    C->>R: Download manifest and encrypted layers
+    R-->>C: Encrypted layers
+
+    C->>CTD: Decrypt layer via stream processor
+    CTD->>CDH: UnWrapKey gRPC port 50000
+
+    Note over CDH: offline_fs_kbc mode
+
+    CDH->>KEYS: Read aa-offline_fs_kbc-resources.json
+    KEYS-->>CDH: KEK base64 decoded
+
+    Note over CDH: Unwrap LEK using KEK
+
+    CDH-->>CTD: LEK
+
+    Note over CTD: Decrypt layer
+
+    CTD-->>C: Decrypted layer
+
+    Note over C: Unpack and snapshot
+
+    C-->>K: Image ready
+
+    Note over K,KEYS: Attestation SKIPPED - KBS NOT contacted
 ```
 
 ### 3.6 Comparison: CoCo vs This Approach
 
-| Aspect | Full CoCo (with Kata) | Without Kata |
-|--------|----------------------|---------------|
-| **TEE boundary** | Micro-VM per pod [23] | Entire CVM |
-| **Isolation** | Pod-level hardware isolation [23] | Node-level hardware isolation |
-| **Runtime** | kata-runtime [6] | runc/crun |
-| **Virtualization** | Required (QEMU/CLH) [6] | Not required |
-| **Components** | kata-agent, image-rs, CDH, AA [6] | AA only [16] |
-| **Complexity** | Higher | Lower |
-| **Image pull** | Inside micro-VM [17] | On CVM (still in TEE) |
-| **Multi-tenancy** | Strong (per-pod TEE) [23] | Weaker (shared CVM) [24] |
+| Aspect             | Full CoCo (with Kata)             | Without Kata                  |
+|--------------------|-----------------------------------|-------------------------------|
+| **TEE boundary**   | Micro-VM per pod [23]             | Entire CVM                    |
+| **Isolation**      | Pod-level hardware isolation [23] | Node-level hardware isolation |
+| **Runtime**        | kata-runtime [6]                  | runc/crun                     |
+| **Virtualization** | Required (QEMU/CLH) [6]           | Not required                  |
+| **Components**     | kata-agent, image-rs, CDH, AA [6] | AA only [16]                  |
+| **Complexity**     | Higher                            | Lower                         |
+| **Image pull**     | Inside micro-VM [17]              | On CVM (still in TEE)         |
+| **Multi-tenancy**  | Strong (per-pod TEE) [23]         | Weaker (shared CVM) [24]      |
 
 ### 3.7 What We Lose Without Kata Runtime
 
@@ -570,9 +706,6 @@ flowchart TB
         end
     end
     
-    style TEE1 fill:#E6F3FF,stroke:#0066CC
-    style TEE2 fill:#E6FFE6,stroke:#009900
-    style TEE3 fill:#FFE6E6,stroke:#CC0000
 ```
 
 A compromised container cannot access another pod's memory or decrypted data due to hardware-enforced isolation [23].
@@ -596,7 +729,6 @@ flowchart TB
     PB -.-> NS
     PC -.-> NS
     
-    style CVM fill:#FFFACD,stroke:#DAA520,stroke-width:2px
 ```
 
 Container isolation relies on Linux namespaces/cgroups, not hardware TEE boundaries.
@@ -605,12 +737,12 @@ Container isolation relies on Linux namespaces/cgroups, not hardware TEE boundar
 
 #### 3.7.2 Per-Pod Attestation
 
-| Capability | With Kata | Without Kata |
-|------------|-----------|--------------|
-| Pod attestation identity | Unique per pod [25] | Single node identity |
-| KBS policy granularity | Per-pod policies [25] | Node-level only |
-| Workload verification | Individual pod [25] | All pods same identity |
-| Multi-tenant attestation | Supported [25] | Not supported |
+| Capability               | With Kata             | Without Kata           |
+|--------------------------|-----------------------|------------------------|
+| Pod attestation identity | Unique per pod [25]   | Single node identity   |
+| KBS policy granularity   | Per-pod policies [25] | Node-level only        |
+| Workload verification    | Individual pod [25]   | All pods same identity |
+| Multi-tenant attestation | Supported [25]        | Not supported          |
 
 TEEs can be used to encapsulate different levels of the architecture stack with three key levels being node vs pod vs container [25]. With Kata, each pod's CVM has a unique attestation report; without Kata, attestation covers the entire node [25].
 
@@ -656,135 +788,19 @@ No equivalent policy enforcement layer. The host's kubelet/containerd directly m
 
 #### 3.7.6 Summary: Trade-off Matrix
 
-| Capability | With Kata | Without Kata | Impact |
-|------------|-----------|--------------|--------|
-| Pod-level TEE isolation | ✅ Hardware enforced [23] | ❌ Namespace only | High |
-| Per-pod attestation | ✅ Yes [25] | ❌ Node-level only | High |
-| Per-pod key policies | ✅ Yes [18] | ❌ Shared identity | Medium |
-| Agent policy enforcement | ✅ Rego policies [26] | ❌ None | High |
-| Malicious orchestrator protection | ✅ TEE-side validation [26] | ⚠️ Partial | Medium |
-| Integrated signature verification | ✅ Tight integration [14] | ⚠️ Separate config | Low |
-| Mixed workload types | ✅ Per-pod choice [6] | ❌ All-or-nothing | Medium |
-| Deployment complexity | ❌ Higher | ✅ Lower | Operational |
-| Performance overhead | ❌ VM per pod [23] | ✅ Native containers | Performance |
+| Capability                        | With Kata                  | Without Kata        | Impact      |
+|-----------------------------------|----------------------------|---------------------|-------------|
+| Pod-level TEE isolation           | ✅ Hardware enforced [23]   | ❌ Namespace only    | High        |
+| Per-pod attestation               | ✅ Yes [25]                 | ❌ Node-level only   | High        |
+| Per-pod key policies              | ✅ Yes [18]                 | ❌ Shared identity   | Medium      |
+| Agent policy enforcement          | ✅ Rego policies [26]       | ❌ None              | High        |
+| Malicious orchestrator protection | ✅ TEE-side validation [26] | ⚠️ Partial          | Medium      |
+| Integrated signature verification | ✅ Tight integration [14]   | ⚠️ Separate config  | Low         |
+| Mixed workload types              | ✅ Per-pod choice [6]       | ❌ All-or-nothing    | Medium      |
+| Deployment complexity             | ❌ Higher                   | ✅ Lower             | Operational |
+| Performance overhead              | ❌ VM per pod [23]          | ✅ Native containers | Performance |
 
-### 3.8 When the No-Kata Approach is Acceptable
 
-Despite these limitations, the no-Kata approach is appropriate when:
-
-1. **Single-tenant CVM**: Only one organization's workloads run in the CVM
-2. **Trusted workloads**: All containers are from trusted sources and don't require isolation from each other
-3. **Simplified operations**: Operational simplicity outweighs fine-grained isolation
-4. **Development/testing**: Validating encrypted image workflows before full CoCo deployment
-5. **Edge deployments**: Resource-constrained environments where per-pod VMs are impractical
-6. **Lift-and-shift**: Migrating existing Kubernetes workloads to CVMs with minimal changes
-
-### 3.9 Security Model Comparison
-
-#### CoCo Security Model (With Kata)
-
-```mermaid
-flowchart TB
-    subgraph Untrusted["Untrusted (Host)"]
-        HOST["Host OS"]
-        HV["Hypervisor"]
-        K8S_HOST["kubelet / containerd"]
-        CLOUD["Cloud Provider"]
-        ADJ["Adjacent Tenants"]
-    end
-    
-    subgraph TEE1["Pod A TEE (Isolated) [23]"]
-        KA1["kata-agent"]
-        AA1["Attestation Agent"]
-        C1["Container A"]
-    end
-    
-    subgraph TEE2["Pod B TEE (Isolated) [23]"]
-        KA2["kata-agent"]
-        AA2["Attestation Agent"]
-        C2["Container B"]
-    end
-    
-    subgraph TEE3["Pod C TEE (Isolated) [23]"]
-        KA3["kata-agent"]
-        AA3["Attestation Agent"]
-        C3["Container C"]
-    end
-    
-    subgraph Verified["Verified via Attestation [18]"]
-        KBS["KBS"]
-    end
-    
-    K8S_HOST -.->|"Limited API [26]"| KA1
-    K8S_HOST -.->|"Limited API [26]"| KA2
-    K8S_HOST -.->|"Limited API [26]"| KA3
-    
-    AA1 <-->|"Attested [18]"| KBS
-    AA2 <-->|"Attested [18]"| KBS
-    AA3 <-->|"Attested [18]"| KBS
-    
-    HOST -.->|"Cannot access"| TEE1
-    HOST -.->|"Cannot access"| TEE2
-    HOST -.->|"Cannot access"| TEE3
-    
-    TEE1 -.->|"Cannot access"| TEE2
-    TEE2 -.->|"Cannot access"| TEE3
-    
-    style TEE1 fill:#E6FFE6,stroke:#009900,stroke-width:2px
-    style TEE2 fill:#E6F3FF,stroke:#0066CC,stroke-width:2px
-    style TEE3 fill:#FFF0E6,stroke:#CC6600,stroke-width:2px
-    style Untrusted fill:#FFE6E6,stroke:#CC0000
-    style Verified fill:#E6E6FF,stroke:#0000CC
-```
-
-In the CoCo model:
-- **Each pod** runs in its own hardware-isolated TEE (micro-VM) [23]
-- **Pods cannot access each other's memory** — hardware enforced isolation [23]
-- **Host/hypervisor is untrusted** — can only communicate via constrained kata-agent API [26]
-- **Per-pod attestation** — each pod has unique identity, KBS can apply per-pod policies [25]
-- **kata-agent enforces policies** — blocks unauthorized operations even from compromised host [26]
-
-#### No-Kata Security Model (This Approach)
-
-```mermaid
-flowchart TB
-    subgraph Trusted["Trusted (Inside TEE)"]
-        CVM["CVM Runtime"]
-        K8S["Kubernetes Components"]
-        CD["containerd"]
-        AA["Attestation Agent [16]"]
-        CONT["All Containers"]
-    end
-    
-    subgraph Untrusted["Untrusted (Outside TEE)"]
-        HV["Hypervisor"]
-        HOST["Host OS"]
-        CLOUD["Cloud Provider"]
-        ADJ["Adjacent Tenants"]
-    end
-    
-    subgraph Verified["Verified via Attestation [18]"]
-        KBS["KBS"]
-    end
-    
-    AA <-->|"Attested Channel [18]"| KBS
-    
-    HOST -.->|"Cannot access"| Trusted
-    CLOUD -.->|"Cannot access"| Trusted
-    
-    style Trusted fill:#E6FFE6,stroke:#009900,stroke-width:2px
-    style Untrusted fill:#FFE6E6,stroke:#CC0000
-    style Verified fill:#E6E6FF,stroke:#0000CC
-```
-
-In this approach:
-- The **entire CVM** is the trust boundary
-- All containers share the same TEE [24]
-- Host infrastructure (hypervisor, cloud provider, adjacent tenants) remains untrusted
-- Decryption keys are released only after CVM attestation [18]
-- All workloads inside the CVM must trust each other
-
----
 
 ## 4. References
 
