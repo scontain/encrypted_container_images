@@ -2,7 +2,7 @@
 
 This document explains the architecture and mechanisms for pulling encrypted container images in Confidential VMs (CVMs) without the Kata runtime. It covers the standard Kubernetes image pull process, how Confidential Containers (CoCo) handles encrypted images, and how to achieve attestation-gated decryption in a CVM using only the Attestation Agent.
 
-> **Practical Implementation**: For step-by-step instructions on deploying this architecture on Azure TDX CVMs, see the companion [DEMO.md](./DEMO.md).
+> **Practical Implementation**: For step-by-step instructions on deploying this architecture on Azure TDX CVMs, see the companion [README.md](./README.md).
 
 ## Table of Contents
 
@@ -70,7 +70,7 @@ The kubelet calls the CRI `PullImage` RPC on containerd, providing the image ref
 
 #### Step 3: Manifest Resolution
 
-containerd resolves the image reference to a specific manifest using the OCI Distribution Specification [4]:
+containerd resolves the image reference to a specific manifest using the OCI (Open Container Initiative) Distribution Specification [4]:
 
 1. **Tag resolution**: If using a tag (e.g., `nginx:latest`), query the registry's manifest endpoint `GET /v2/<name>/manifests/<reference>` [4]
 2. **Manifest fetch**: Download the image manifest containing configuration and layer digests [4]
@@ -204,6 +204,8 @@ The annotation key follows the pattern `org.opencontainers.image.enc.keys.provid
 
 ### 2.3 Key Hierarchy
 
+The **Key Broker Service (KBS)** is a remote service that securely stores encryption keys and releases them only after verifying TEE attestation evidence. It works with an Attestation Service to validate that the requesting environment is a genuine, unmodified TEE [12].
+
 ```mermaid
 flowchart TB
     KEK["KEK (Key Encryption Key)<br/>Stored in KBS<br/>Released after attestation"]
@@ -257,8 +259,12 @@ flowchart TB
     IR -->|"Pull layers"| REG
     AA -->|"Attestation + Key Request"| KBS
 
-   
+
 ```
+
+**Host-side components:**
+- **kata-shim**: The containerd shim v2 implementation for Kata Containers. It acts as a bridge between containerd and the hypervisor, translating CRI requests into VM operations and managing the lifecycle of the micro-VM [6].
+- **nydus-snapshotter**: A containerd snapshotter plugin that intercepts image pull requests and redirects them to be handled inside the guest VM. This enables lazy-pulling and on-demand loading of container images directly into the TEE [17].
 
 ### 2.5 Guest Components
 
@@ -308,10 +314,13 @@ sequenceDiagram
     Note over KBS: Verify attestation<br/>via Attestation Service
 
     KBS-->>AA: Attestation token JWT
-    AA->>KBS: GET /kbs/v0/resource/path
-    KBS-->>AA: Wrapped KEK
+    AA-->>CDH: Attestation token
 
-    AA-->>CDH: KEK
+    CDH->>KBS: GET /kbs/v0/resource/path
+    KBS-->>CDH: KEK
+
+    Note over CDH: Unwrap LEK using KEK
+
     CDH-->>IR: Unwrapped LEK
 
     Note over IR: Decrypt layers
@@ -328,25 +337,36 @@ The Attestation Agent uses the **RCAR (Request-Challenge-Attestation-Response)**
 
 ```mermaid
 sequenceDiagram
+    participant CDH as CDH
     participant AA as Attestation Agent
     participant KBS as Key Broker Service
     participant AS as Attestation Service
 
-    AA->>KBS: 1. POST /kbs/v0/auth
+    rect rgb(40, 40, 60)
+    Note over AA,KBS: RCAR Protocol
+
+    AA->>KBS: 1. POST /kbs/v0/auth (Request)
     KBS-->>AA: 2. Challenge with nonce
 
     Note over AA: Generate TEE quote<br/>including nonce
 
-    AA->>KBS: 3. POST /kbs/v0/attest with TEE evidence
+    AA->>KBS: 3. POST /kbs/v0/attest (Attestation)
 
     KBS->>AS: Verify evidence
     AS-->>KBS: Verification result
 
-    KBS-->>AA: 4. Attestation token JWT
+    KBS-->>AA: 4. Attestation token JWT (Response)
 
-    AA->>KBS: 5. GET /kbs/v0/resource/path with Bearer token
-    KBS-->>AA: 6. Wrapped KEK
+    end
+
+    Note over AA,KBS: Resource Retrieval (post-attestation)
+
+    AA-->>CDH: Return token to CDH
+    CDH->>KBS: GET /kbs/v0/resource/path with Bearer token
+    KBS-->>CDH: KEK
 ```
+
+The RCAR protocol (steps 1-4) establishes trust and ends when the attestation token (JWT) is issued. Resource retrieval (fetching the KEK) is a separate step performed by CDH using the token obtained from RCAR.
 
 The protocol ensures:
 - **Freshness**: Nonce prevents replay attacks [18]
@@ -369,7 +389,7 @@ The protocol ensures:
 
 ## 3. Pulling Encrypted Images Without Kata Runtime
 
-> **Demo Note**: The companion [DEMO.md](./DEMO.md) implements this architecture using `offline_fs_kbc` mode, which stores decryption keys locally and **bypasses remote attestation**. This simplifies deployment but provides **no security guarantees**. 
+> **Demo Note**: The companion [README.md](./README.md) implements this architecture using `offline_fs_kbc` mode, which stores decryption keys locally and **bypasses remote attestation**. This simplifies deployment but provides **no security guarantees**. 
 
 ### 3.1 Motivation
 
@@ -473,7 +493,7 @@ flowchart TB
 
 #### ocicrypt Keyprovider Protocol
 
-The `ocicrypt` library supports a **keyprovider protocol** that allows external services to handle key operations [11]. The configuration is read from the `OCICRYPT_KEYPROVIDER_CONFIG` environment variable [21]. When containerd encounters an encrypted layer:
+The `ocicrypt` library supports a **keyprovider protocol** that allows external services to handle key operations [11]. The configuration is read from the `OCICRYPT_KEYPROVIDER_CONFIG` environment variable [20]. When containerd encounters an encrypted layer:
 
 ##### Production Flow (cc_kbc with Remote Attestation)
 
@@ -566,7 +586,7 @@ When CDH receives an `UnWrapKey` request [15], it:
 
 #### containerd Configuration
 
-containerd supports encrypted image decryption through stream processors [10]. The `ctd-decoder` binary from the imgcrypt project handles decryption [10]. Configuration uses `key_model = "node"` where encryption is tied to worker nodes [22].
+containerd supports encrypted image decryption through stream processors [10]. The `ctd-decoder` binary from the imgcrypt project handles decryption [10]. Configuration uses `key_model = "node"` where encryption is tied to worker nodes [21].
 
 ### 3.4 Components Required
 
@@ -578,7 +598,7 @@ containerd supports encrypted image decryption through stream processors [10]. T
 | **Attestation Agent**         | `confidential-containers/guest-components` [16] | TEE attestation service (ttrpc unix socket) |
 | **KBS + Attestation Service** | `confidential-containers/trustee` [12]          | External key broker and verifier            |
 
-Both CDH and AA can be built with different attesters depending on the TEE platform: `tdx-attester`, `snp-attester`, `az-snp-vtpm-attester`, `az-tdx-vtpm-attester`, `sgx-attester`, `cca-attester`, and `se-attester` [20].
+Both CDH and AA can be built with different attesters depending on the TEE platform: `tdx-attester`, `snp-attester`, `az-snp-vtpm-attester`, `az-tdx-vtpm-attester`, `sgx-attester`, `cca-attester`, and `se-attester` [19].
 
 **Build Configuration:**
 - CDH: Built with `grpc` and `kbs` features to expose keyprovider service
@@ -628,7 +648,7 @@ sequenceDiagram
 
 #### Demo Flow (offline_fs_kbc - No Attestation)
 
-> **Note**: This is the flow used in [DEMO.md](./DEMO.md). Attestation is bypassed and keys are read from a local file.
+> **Note**: This is the flow used in [README.md](./README.md). Attestation is bypassed and keys are read from a local file.
 
 ```mermaid
 sequenceDiagram
@@ -665,141 +685,6 @@ sequenceDiagram
 
     Note over K,KEYS: Attestation SKIPPED - KBS NOT contacted
 ```
-
-### 3.6 Comparison: CoCo vs This Approach
-
-| Aspect             | Full CoCo (with Kata)             | Without Kata                  |
-|--------------------|-----------------------------------|-------------------------------|
-| **TEE boundary**   | Micro-VM per pod [23]             | Entire CVM                    |
-| **Isolation**      | Pod-level hardware isolation [23] | Node-level hardware isolation |
-| **Runtime**        | kata-runtime [6]                  | runc/crun                     |
-| **Virtualization** | Required (QEMU/CLH) [6]           | Not required                  |
-| **Components**     | kata-agent, image-rs, CDH, AA [6] | AA only [16]                  |
-| **Complexity**     | Higher                            | Lower                         |
-| **Image pull**     | Inside micro-VM [17]              | On CVM (still in TEE)         |
-| **Multi-tenancy**  | Strong (per-pod TEE) [23]         | Weaker (shared CVM) [24]      |
-
-### 3.7 What We Lose Without Kata Runtime
-
-Choosing the no-Kata approach involves significant trade-offs in security properties.
-
-#### 3.7.1 Pod-Level TEE Isolation
-
-**With Kata (CoCo):**
-
-Each pod runs in its own micro-VM backed by a dedicated TEE [23]. Each VM hosts a single kata-agent [23], and each Kata pod gets its own kernel per nested Kata guest VM [24].
-
-```mermaid
-flowchart TB
-    subgraph Host["Worker Node"]
-        subgraph TEE1["TEE 1"]
-            PA["Pod A<br/>Container"]
-            MA["Isolated Memory A"]
-        end
-        subgraph TEE2["TEE 2"]
-            PB["Pod B<br/>Container"]
-            MB["Isolated Memory B"]
-        end
-        subgraph TEE3["TEE 3"]
-            PC["Pod C<br/>Container"]
-            MC["Isolated Memory C"]
-        end
-    end
-    
-```
-
-A compromised container cannot access another pod's memory or decrypted data due to hardware-enforced isolation [23].
-
-**Without Kata:**
-
-All pods share the same CVM [24]. CVM-only deployments provide "VM level isolation with unique memory encryption key per VM" — containers share the CVM's memory space while protected from the host [24].
-
-```mermaid
-flowchart TB
-    subgraph CVM["Single CVM (Single TEE)"]
-        subgraph Shared["Shared TEE Memory"]
-            PA["Pod A<br/>Container"]
-            PB["Pod B<br/>Container"]
-            PC["Pod C<br/>Container"]
-        end
-        NS["Linux namespace isolation only"]
-    end
-    
-    PA -.-> NS
-    PB -.-> NS
-    PC -.-> NS
-    
-```
-
-Container isolation relies on Linux namespaces/cgroups, not hardware TEE boundaries.
-
-**Impact:** A container escape vulnerability could expose all workloads' decrypted data within the CVM.
-
-#### 3.7.2 Per-Pod Attestation
-
-| Capability               | With Kata             | Without Kata           |
-|--------------------------|-----------------------|------------------------|
-| Pod attestation identity | Unique per pod [25]   | Single node identity   |
-| KBS policy granularity   | Per-pod policies [25] | Node-level only        |
-| Workload verification    | Individual pod [25]   | All pods same identity |
-| Multi-tenant attestation | Supported [25]        | Not supported          |
-
-TEEs can be used to encapsulate different levels of the architecture stack with three key levels being node vs pod vs container [25]. With Kata, each pod's CVM has a unique attestation report; without Kata, attestation covers the entire node [25].
-
-**Impact:** Multi-tenant scenarios where different workload owners require independent attestation are not supported.
-
-#### 3.7.3 Per-Pod Encryption Keys
-
-**With Kata:** Each pod's attestation can be verified independently, and KBS can release different keys based on pod-specific policies [18].
-
-**Without Kata:** All image decryption uses the same node-level attestation. The KBS cannot distinguish which pod is requesting the key—it only sees the node's attestation evidence.
-
-**Impact:** Cannot implement fine-grained key release policies based on pod identity.
-
-#### 3.7.4 Kata Agent Policy Enforcement
-
-**With Kata (CoCo):**
-The kata-agent enforces Rego policies that restrict operations [26]. The Kata Agent is responsible for enforcing the Policy, working together with OPA, checking the Policy for each ttRPC API request [26].
-
-```rego
-# Only allow specific images
-CreateContainerRequest if {
-    input.image in policy_data.allowed_images
-}
-
-# Block exec into containers
-ExecProcessRequest := false
-```
-
-These policies are evaluated inside the TEE, protecting against malicious host requests [26].
-
-**Without Kata:**
-No equivalent policy enforcement layer. The host's kubelet/containerd directly manages containers.
-
-**Impact:** Cannot enforce workload-specific security policies at the TEE boundary.
-
-#### 3.7.5 Protection Against Malicious Orchestration
-
-**With Kata:** The kata-agent validates all requests from the host [26]. Even if the Kubernetes control plane is compromised, TEE-side policy prevents running unauthorized images, executing arbitrary commands, or mounting unauthorized volumes [26].
-
-**Without Kata:** The kubelet and containerd run inside the CVM and are trusted, but the Kubernetes API server is typically outside. A compromised control plane could schedule malicious pods to the CVM.
-
-**Impact:** Trust boundary extends to the Kubernetes control plane, not just the CVM.
-
-#### 3.7.6 Summary: Trade-off Matrix
-
-| Capability                        | With Kata                  | Without Kata        | Impact      |
-|-----------------------------------|----------------------------|---------------------|-------------|
-| Pod-level TEE isolation           | ✅ Hardware enforced [23]   | ❌ Namespace only    | High        |
-| Per-pod attestation               | ✅ Yes [25]                 | ❌ Node-level only   | High        |
-| Per-pod key policies              | ✅ Yes [18]                 | ❌ Shared identity   | Medium      |
-| Agent policy enforcement          | ✅ Rego policies [26]       | ❌ None              | High        |
-| Malicious orchestrator protection | ✅ TEE-side validation [26] | ⚠️ Partial          | Medium      |
-| Integrated signature verification | ✅ Tight integration [14]   | ⚠️ Separate config  | Low         |
-| Mixed workload types              | ✅ Per-pod choice [6]       | ❌ All-or-nothing    | Medium      |
-| Deployment complexity             | ❌ Higher                   | ✅ Lower             | Operational |
-| Performance overhead              | ❌ VM per pod [23]          | ✅ Native containers | Performance |
-
 
 
 ## 4. References
@@ -840,18 +725,8 @@ No equivalent policy enforcement layer. The host's kubelet/containerd directly m
 
 [18] Confidential Containers Project, "KBS Attestation Protocol," GitHub. Available: https://github.com/confidential-containers/trustee/blob/main/kbs/docs/kbs_attestation_protocol.md
 
-[19] containers/ocicrypt Authors, "keyprovider.proto," GitHub. Available: https://github.com/containers/ocicrypt/blob/main/utils/keyprovider/keyprovider.proto
+[19] Confidential Containers Project, "Attestation Agent README," GitHub. Available: https://github.com/confidential-containers/guest-components/tree/main/attestation-agent
 
-[20] Confidential Containers Project, "Attestation Agent README," GitHub. Available: https://github.com/confidential-containers/guest-components/tree/main/attestation-agent
+[20] containers/ocicrypt Authors, "keyprovider-config/config.go," GitHub. Available: https://github.com/containers/ocicrypt/blob/main/config/keyprovider-config/config.go
 
-[21] containers/ocicrypt Authors, "keyprovider-config/config.go," GitHub. Available: https://github.com/containers/ocicrypt/blob/main/config/keyprovider-config/config.go
-
-[22] containerd Authors, "CRI Decryption," GitHub. Available: https://github.com/containerd/containerd/blob/main/docs/cri/decryption.md
-
-[23] Amazon Web Services, "Enhancing Kubernetes workload isolation and security using Kata Containers," AWS Containers Blog. Available: https://aws.amazon.com/blogs/containers/enhancing-kubernetes-workload-isolation-and-security-using-kata-containers/
-
-[24] Microsoft, "Choose Confidential Containers offerings," Azure Documentation. Available: https://learn.microsoft.com/en-us/azure/confidential-computing/choose-confidential-containers-offerings
-
-[25] Confidential Containers Project, "Overview," GitHub. Available: https://github.com/confidential-containers/documentation/blob/main/overview.md
-
-[26] Kata Containers Project, "How to use the Kata Agent Policy," GitHub. Available: https://github.com/kata-containers/kata-containers/blob/main/docs/how-to/how-to-use-the-kata-agent-policy.md
+[21] containerd Authors, "CRI Decryption," GitHub. Available: https://github.com/containerd/containerd/blob/main/docs/cri/decryption.md
