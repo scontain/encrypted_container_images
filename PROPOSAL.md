@@ -204,7 +204,7 @@ The annotation key follows the pattern `org.opencontainers.image.enc.keys.provid
 
 ### 2.3 Key Hierarchy
 
-The **Key Broker Service (KBS)** is a remote service that securely stores encryption keys and releases them only after verifying TEE attestation evidence. It works with an Attestation Service to validate that the requesting environment is a genuine, unmodified TEE [12].
+The **Key Broker Service (KBS)** is a remote service that stores encryption keys and releases them only after verifying TEE attestation evidence. It works with an Attestation Service to validate that the requesting environment is a genuine, unmodified TEE [12].
 
 ```mermaid
 flowchart TB
